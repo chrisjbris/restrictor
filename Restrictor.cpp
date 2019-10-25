@@ -23,18 +23,6 @@
 
 using namespace llvm;
 
-PreservedAnalyses Restrictor::run(llvm::Module &M,
-                              llvm::ModuleAnalysisManager &) {
-  bool Changed = false;
-
-  for (auto &Function : M)
-    Changed |= do_comparison_stuff(Function);
-
-  M.getFunctionList().insert(M.end(), NewFunctions.begin(), NewFunctions.end());
-
-  return (Changed ? llvm::PreservedAnalyses::none()
-                  : llvm::PreservedAnalyses::all());
-}
 
 static bool IsRestrictable(llvm::Function &F)
 {
@@ -54,7 +42,22 @@ static bool IsRestrictable(llvm::Function &F)
   return false;
 }
 
-static void SetPointerArgumentsRestricted(llvm::Function &F)
+PreservedAnalyses Restrictor::run(llvm::Module &M,
+                              llvm::ModuleAnalysisManager &) {
+  bool Changed = false;
+
+  for (auto &Function : M)
+    if(IsRestrictable(Function))
+      FunctionsToRestrict.push_back(&Function);
+
+  for (auto &Function: FunctionsToRestrict)
+    do_comparison_stuff(*Function);
+
+  return (Changed ? llvm::PreservedAnalyses::none()
+                  : llvm::PreservedAnalyses::all());
+}
+
+static void SetPointerArgumentsRestricted(llvm::Function& F)
 {
     for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i) {
         if(i->getType()->isPointerTy())
@@ -63,32 +66,34 @@ static void SetPointerArgumentsRestricted(llvm::Function &F)
           unsigned int argumentIndex = i->getArgNo(); 
           llvm::AttributeList Attributes = F.getAttributes()
                                             .addAttribute(context, 
-                                                          argumentIndex, 
+                                                          argumentIndex + 1, 
                                                           llvm::Attribute::NoAlias); // F itself is 0
           F.setAttributes(Attributes);
+          errs() << "Modified argument: " << i->getName() << "\n";
         }
     }
 }
 
-bool Restrictor::do_comparison_stuff(llvm::Function &F)
+bool Restrictor::do_comparison_stuff(llvm::Function& F)
 {
   if(!IsRestrictable(F))
     return true;
 
   ValueToValueMapTy VMap;
-  // build map from old to new arguments
-
   Function *restrictedFunction = llvm::CloneFunction(&F, VMap, nullptr);
   restrictedFunction->setName(F.getName() + "_restricted");
-  NewFunctions.push_back(restrictedFunction);
+  SetPointerArgumentsRestricted(*restrictedFunction);
+  FunctionsToRestrict.push_back(restrictedFunction);
 
   VMap.clear();
   Function *originalFunctionClone = llvm::CloneFunction(&F, VMap, nullptr);
   originalFunctionClone->setName(F.getName() + "_original");
-  NewFunctions.push_back(originalFunctionClone);
+  FunctionsToRestrict.push_back(originalFunctionClone);
 
-  errs() << "Visiting: " << F.getName();
+  errs() << "Selected: " << F.getName();
   errs() << " Generated: " << restrictedFunction->getName() << "\n";
+  errs() << " Generated: " << originalFunctionClone->getName() << "\n";
+
 
 
   return false; // analyses preserved?

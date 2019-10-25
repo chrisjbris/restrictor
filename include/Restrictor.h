@@ -10,7 +10,7 @@ struct Restrictor : public llvm::PassInfoMixin<Restrictor> {
                               llvm::ModuleAnalysisManager &);
   bool do_comparison_stuff(llvm::Function &F);
 
-  std::vector<llvm::Function*> NewFunctions;
+  std::vector<llvm::Function*> FunctionsToRestrict;
 };
 
 #endif
