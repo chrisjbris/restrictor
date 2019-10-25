@@ -36,7 +36,9 @@ static bool IsRestrictable(llvm::Function &F)
       restrictableArguments++;
 
     if(restrictableArguments == 2)
-`     return true;
+    {
+      return true;
+    }
   }
   
   return false;
@@ -44,14 +46,19 @@ static bool IsRestrictable(llvm::Function &F)
 
 PreservedAnalyses Restrictor::run(llvm::Module &M,
                               llvm::ModuleAnalysisManager &) {
+                                
   bool Changed = false;
+  std::vector<llvm::Function*> FunctionsToRestrict;
 
-  for (auto &Function : M)
-    if(IsRestrictable(Function))
-      FunctionsToRestrict.push_back(&Function);
+  for (auto &F : M){
+    if(IsRestrictable(F))
+      FunctionsToRestrict.push_back(&F);
+  }
 
   for (auto &Function: FunctionsToRestrict)
-    do_comparison_stuff(*Function);
+  {
+    Changed |= do_comparison_stuff(*Function);
+  }
 
   return (Changed ? llvm::PreservedAnalyses::none()
                   : llvm::PreservedAnalyses::all());
@@ -96,22 +103,26 @@ static void ModifyFunctionToBranch(llvm::Function& F,
   BasicBlock* CastBlock = BasicBlock::Create(F.getContext(), "check_alias", &F, nullptr);
   for(int i = 1; i < pointerArgumentIndexes.size(); i++)
   {
-    llvm::Argument *arg0 = F.getArg(pointerArgumentIndexes[i-1]);
-    llvm::Argument *arg1 = F.getArg(pointerArgumentIndexes[i]);
+    llvm::Argument *arg0 = F.getArg(pointerArgumentIndexes[i]);
 
-    IRBuilder<> CastBuilder(CastBlock);
-    CastBlock = BasicBlock::Create(F.getContext(), "check_alias", &F, nullptr);
-    BasicBlock* trueBlock = BasicBlock::Create(F.getContext(), "true", &F, nullptr);
-    Value *Cast0 = CastBuilder.CreatePointerCast(arg0, T);
-    Value *Cast1 = CastBuilder.CreatePointerCast(arg1, T);
-    Value *Cmp = CastBuilder.CreateICmpEQ(Cast0, Cast1);
-    Value *Br = CastBuilder.CreateCondBr(Cmp, trueBlock, CastBlock);
+    for (int inner = 0; inner < i; ++inner)
+    {
+      IRBuilder<> CastBuilder(CastBlock);
+      CastBlock = BasicBlock::Create(F.getContext(), "check_alias", &F, nullptr);
+      BasicBlock* trueBlock = BasicBlock::Create(F.getContext(), "true", &F, nullptr);
+      Value *Cast0 = CastBuilder.CreatePointerCast(arg0, T);
+
+      llvm::Argument *arg1 = F.getArg(pointerArgumentIndexes[inner]);
+      Value *Cast1 = CastBuilder.CreatePointerCast(arg1, T);
+      Value *Cmp = CastBuilder.CreateICmpEQ(Cast0, Cast1);
+      Value *Br = CastBuilder.CreateCondBr(Cmp, trueBlock, CastBlock);
     
-    SmallVector<llvm::Value *, 4> args;
-    for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
-      args.push_back(i);
-    IRBuilder<> B(trueBlock);
-    B.CreateRet(B.CreateCall(originalClone, ArrayRef<llvm::Value*>(args)));
+      SmallVector<llvm::Value *, 4> args;
+      for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
+        args.push_back(i);
+      IRBuilder<> B(trueBlock);
+      B.CreateRet(B.CreateCall(originalClone, ArrayRef<llvm::Value*>(args)));
+    }
   }
 
   IRBuilder<> FB(CastBlock);
@@ -124,19 +135,14 @@ static void ModifyFunctionToBranch(llvm::Function& F,
 
 bool Restrictor::do_comparison_stuff(llvm::Function& F)
 {
-  if(!IsRestrictable(F))
-    return true;
-
   ValueToValueMapTy VMap;
   Function *restrictedFunction = llvm::CloneFunction(&F, VMap, nullptr);
   restrictedFunction->setName(F.getName() + "_restricted");
   SetPointerArgumentsRestricted(*restrictedFunction);
-  FunctionsToRestrict.push_back(restrictedFunction);
 
   VMap.clear();
   Function *originalFunctionClone = llvm::CloneFunction(&F, VMap, nullptr);
   originalFunctionClone->setName(F.getName() + "_original");
-  FunctionsToRestrict.push_back(originalFunctionClone);
 
   ModifyFunctionToBranch(F, restrictedFunction, originalFunctionClone);
 
@@ -145,6 +151,7 @@ bool Restrictor::do_comparison_stuff(llvm::Function& F)
   errs() << " Generated: " << originalFunctionClone->getName() << "\n";
   errs() << " Modified: " << F.getName() << "\n";
 
+  // TODO: return if transformed
   return false; // analyses preserved?
 }
 
