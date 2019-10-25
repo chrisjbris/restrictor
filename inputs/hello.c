@@ -9,7 +9,7 @@
 //=============================================================================
 int foo(int a) { return a * 2; }
 
-int bar(int *a, int *b) { return (*a + *b * 2); }
+int bar(int *a, int *b, int *c) { (void)c; return (*a + *b * 2); }
 int fez(int a, int b, int c) { return (a + b * 2 + c * 3); }
 
 int main(int argc, const char **argv) {
@@ -17,5 +17,5 @@ int main(int argc, const char **argv) {
   int b = 11;
   int c = 111;
 
-  return (foo(a) + bar(&a, &b) + fez(a, b, c));
+  return (foo(a) + bar(&a, &b, 0) + fez(a, b, c));
 }
