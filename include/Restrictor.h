@@ -8,7 +8,7 @@
 struct Restrictor : public llvm::PassInfoMixin<Restrictor> {
   llvm::PreservedAnalyses run(llvm::Module &M,
                               llvm::ModuleAnalysisManager &);
-  bool do_comparison_stuff(llvm::Function &F);
+  bool Generate(llvm::Function &F);
 };
 
 #endif

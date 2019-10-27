@@ -20,9 +20,9 @@
 
 #include "Restrictor.h"
 
+#include <memory>
 
 using namespace llvm;
-
 
 static bool IsRestrictable(llvm::Function &F)
 {
@@ -36,9 +36,7 @@ static bool IsRestrictable(llvm::Function &F)
       restrictableArguments++;
 
     if(restrictableArguments == 2)
-    {
       return true;
-    }
   }
   
   return false;
@@ -57,14 +55,15 @@ PreservedAnalyses Restrictor::run(llvm::Module &M,
 
   for (auto &Function: FunctionsToRestrict)
   {
-    Changed |= do_comparison_stuff(*Function);
+    Changed |= Generate(*Function); // Our transform doesn't preserve
+                                    // any analyses.
   }
 
   return (Changed ? llvm::PreservedAnalyses::none()
                   : llvm::PreservedAnalyses::all());
 }
 
-static void SetPointerArgumentsRestricted(llvm::Function& F)
+static void SetArgumentsNoAlias(llvm::Function& F)
 {
     for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i) {
         if(i->getType()->isPointerTy())
@@ -80,65 +79,81 @@ static void SetPointerArgumentsRestricted(llvm::Function& F)
     }
 }
 
-static void ModifyFunctionToBranch(llvm::Function& F, 
-      llvm::Function *restricted, llvm::Function *originalClone)
+static SmallVector<llvm::Value*, 4> ArgsToVector(llvm::Function& F)
 {
+  SmallVector<llvm::Value*, 4> Args;
+  for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
+      Args.push_back(i);
 
+  return Args;
+}
+
+static SmallVector<unsigned, 4> GetIndexOfPointerArgs(llvm::Function& F)
+{
+ SmallVector<unsigned, 4> V;
+ for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
+    if(i->getType()->isPointerTy())
+      V.push_back(i->getArgNo());
+
+  return V;
+}
+
+// Add Cast and Compare instructions for the arguments
+static Value* AddCastCmpBranch( llvm::Function *F,
+                                llvm::Argument *Arg0, 
+                                BasicBlock* AddressCheckBlock,
+                                BasicBlock* NoAliasBlock,
+                                BasicBlock* AliasBlock,                                
+                                unsigned argumentIndex)
+{
+  llvm::LLVMContext &C = F->getContext();
+  llvm::Type *T = llvm::Type::getInt8PtrTy(C);  // Cast all pointer args to this.
+  IRBuilder<> CastBuilder(AddressCheckBlock);
+  Value *Cast0 = CastBuilder.CreatePointerCast(Arg0, T);
+
+  llvm::Argument *arg1 = F->getArg(argumentIndex);
+  Value *Cast1 = CastBuilder.CreatePointerCast(arg1, T);
+  Value *Cmp = CastBuilder.CreateICmpEQ(Cast0, Cast1);
+  CastBuilder.CreateCondBr(Cmp, AliasBlock, NoAliasBlock);
+}
+
+static void ModifyFunctionToBranch(llvm::Function& F, 
+      llvm::Function *NoAliasFunction, llvm::Function *OriginalFunctionClone)
+{
   while (F.begin() != F.end())
     F.begin()->eraseFromParent();
-  //for(auto &BB: F)
-   // BB.eraseFromParent();
 
   llvm::LLVMContext &C = F.getContext();
-  llvm::Type *T = llvm::Type::getInt8PtrTy(C);
-
-  SmallVector<unsigned, 4> pointerArgumentIndexes;
-  for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
-    if(i->getType()->isPointerTy())
-      pointerArgumentIndexes.push_back(i->getArgNo());
+  
+  SmallVector<unsigned, 4> pointerArgumentIndexes = GetIndexOfPointerArgs(F);
 
   assert(pointerArgumentIndexes.size() > 1);
 
-  BasicBlock* entry = BasicBlock::Create(C, "entry", nullptr, nullptr);
-  BasicBlock* CastBlock = BasicBlock::Create(F.getContext(), "check_alias", &F, nullptr);
+  BasicBlock* AddressCheckB = BasicBlock::Create(F.getContext(), "address_check", &F, nullptr);
+  BasicBlock *NoAliasB = BasicBlock::Create(C, "no_alias", &F, nullptr);
+  BasicBlock* AliasB = BasicBlock::Create(C, "alias", &F, nullptr);
+  SmallVector<llvm::Value *, 4> Args = ArgsToVector(F);
+  IRBuilder<> CallBuilder(AliasB);
+  CallBuilder.CreateRet(CallBuilder.CreateCall(OriginalFunctionClone, ArrayRef<llvm::Value*>(Args)));
+  
   for(int i = 1; i < pointerArgumentIndexes.size(); i++)
   {
     llvm::Argument *arg0 = F.getArg(pointerArgumentIndexes[i]);
-
     for (int inner = 0; inner < i; ++inner)
-    {
-      IRBuilder<> CastBuilder(CastBlock);
-      CastBlock = BasicBlock::Create(F.getContext(), "check_alias", &F, nullptr);
-      BasicBlock* trueBlock = BasicBlock::Create(F.getContext(), "true", &F, nullptr);
-      Value *Cast0 = CastBuilder.CreatePointerCast(arg0, T);
-
-      llvm::Argument *arg1 = F.getArg(pointerArgumentIndexes[inner]);
-      Value *Cast1 = CastBuilder.CreatePointerCast(arg1, T);
-      Value *Cmp = CastBuilder.CreateICmpEQ(Cast0, Cast1);
-      Value *Br = CastBuilder.CreateCondBr(Cmp, trueBlock, CastBlock);
-    
-      SmallVector<llvm::Value *, 4> args;
-      for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
-        args.push_back(i);
-      IRBuilder<> B(trueBlock);
-      B.CreateRet(B.CreateCall(originalClone, ArrayRef<llvm::Value*>(args)));
-    }
+      Value *Cmp = AddCastCmpBranch(&F, arg0, AddressCheckB, AliasB, NoAliasB, pointerArgumentIndexes[inner]);
   }
 
-  IRBuilder<> FB(CastBlock);
-  SmallVector<llvm::Value *, 4> args;
-    for (auto i = F.arg_begin(), e = F.arg_end(); i != e; ++i)
-      args.push_back(i);
-
-  FB.CreateRet(FB.CreateCall(restricted, ArrayRef<llvm::Value*>(args)));
+  // Pointers can alias
+  IRBuilder<> FB(NoAliasB);
+  FB.CreateRet(FB.CreateCall(NoAliasFunction, ArrayRef<llvm::Value*>(Args)));
 }
 
-bool Restrictor::do_comparison_stuff(llvm::Function& F)
+bool Restrictor::Generate(llvm::Function& F)
 {
   ValueToValueMapTy VMap;
   Function *restrictedFunction = llvm::CloneFunction(&F, VMap, nullptr);
   restrictedFunction->setName(F.getName() + "_restricted");
-  SetPointerArgumentsRestricted(*restrictedFunction);
+  SetArgumentsNoAlias(*restrictedFunction);
 
   VMap.clear();
   Function *originalFunctionClone = llvm::CloneFunction(&F, VMap, nullptr);
@@ -146,13 +161,12 @@ bool Restrictor::do_comparison_stuff(llvm::Function& F)
 
   ModifyFunctionToBranch(F, restrictedFunction, originalFunctionClone);
 
-  errs() << "Selected: " << F.getName();
+  errs() << " Optimisable: " << F.getName() << "\n";
   errs() << " Generated: " << restrictedFunction->getName() << "\n";
   errs() << " Generated: " << originalFunctionClone->getName() << "\n";
   errs() << " Modified: " << F.getName() << "\n";
 
-  // TODO: return if transformed
-  return false; // analyses preserved?
+  return false; // We're making no effort to preserve any analyses
 }
 
 // Register pass
@@ -176,4 +190,3 @@ extern "C" LLVM_ATTRIBUTE_WEAK ::llvm::PassPluginLibraryInfo
 llvmGetPassPluginInfo() {
   return getRestrictorPluginInfo();
 }
-
